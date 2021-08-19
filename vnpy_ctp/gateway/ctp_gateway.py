@@ -840,7 +840,7 @@ class CtpTdApi(TdApi):
             return ""
 
         ctp_req: dict = {
-            "InstrumentID": req.InstrumentId,
+            "InstrumentID": req.instrumentId,
             "ExchangeID": req.exchange.value,
             "Volume": req.volume,
             "Direction": DIRECTION_VT2CTP.get(req.direction, ""),
