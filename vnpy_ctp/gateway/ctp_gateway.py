@@ -8,6 +8,7 @@ from pathlib import Path
 from vnpy.event import EventEngine
 from vnpy.trader.constant import (
     Direction,
+    CombDirectionType,
     Offset,
     Exchange,
     OrderType,
@@ -24,6 +25,7 @@ from vnpy.trader.object import (
     AccountData,
     ContractData,
     OrderRequest,
+    CombRequest,
     CancelRequest,
     SubscribeRequest,
 )
@@ -46,6 +48,8 @@ from ..api import (
     THOST_FTDC_PD_Short,
     THOST_FTDC_OPT_LimitPrice,
     THOST_FTDC_OPT_AnyPrice,
+    THOST_FTDC_CMDR_Comb,
+    THOST_FTDC_CMDR_UnComb,
     THOST_FTDC_OF_Open,
     THOST_FTDC_OFEN_Close,
     THOST_FTDC_OFEN_CloseYesterday,
@@ -83,7 +87,8 @@ DIRECTION_VT2CTP: Dict[Direction, str] = {
     Direction.LONG: THOST_FTDC_D_Buy,
     Direction.SHORT: THOST_FTDC_D_Sell
 }
-DIRECTION_CTP2VT: Dict[str, Direction] = {v: k for k, v in DIRECTION_VT2CTP.items()}
+DIRECTION_CTP2VT: Dict[str, Direction] = {
+    v: k for k, v in DIRECTION_VT2CTP.items()}
 DIRECTION_CTP2VT[THOST_FTDC_PD_Long] = Direction.LONG
 DIRECTION_CTP2VT[THOST_FTDC_PD_Short] = Direction.SHORT
 
@@ -94,7 +99,8 @@ ORDERTYPE_VT2CTP: Dict[OrderType, Tuple] = {
     OrderType.FAK: (THOST_FTDC_OPT_LimitPrice, THOST_FTDC_TC_IOC, THOST_FTDC_VC_AV),
     OrderType.FOK: (THOST_FTDC_OPT_LimitPrice, THOST_FTDC_TC_IOC, THOST_FTDC_VC_CV),
 }
-ORDERTYPE_CTP2VT: Dict[Tuple, OrderType] = {v: k for k, v in ORDERTYPE_VT2CTP.items()}
+ORDERTYPE_CTP2VT: Dict[Tuple, OrderType] = {
+    v: k for k, v in ORDERTYPE_VT2CTP.items()}
 
 # 开平方向映射
 OFFSET_VT2CTP: Dict[Offset, str] = {
@@ -104,6 +110,12 @@ OFFSET_VT2CTP: Dict[Offset, str] = {
     Offset.CLOSEYESTERDAY: THOST_FTDC_OFEN_CloseYesterday,
 }
 OFFSET_CTP2VT: Dict[str, Offset] = {v: k for k, v in OFFSET_VT2CTP.items()}
+
+# 期权组合指令方向映射
+COMB_DIRECTION_CTP2VT: Dict[CombDirectionType, str] = {
+    CombDirectionType.COMB: THOST_FTDC_CMDR_Comb,
+    CombDirectionType.UN_COMB: THOST_FTDC_CMDR_UnComb
+}
 
 # 交易所映射
 EXCHANGE_CTP2VT: Dict[str, Exchange] = {
@@ -182,7 +194,8 @@ class CtpGateway(BaseGateway):
         ):
             md_address = "tcp://" + md_address
 
-        self.td_api.connect(td_address, userid, password, brokerid, auth_code, appid)
+        self.td_api.connect(td_address, userid, password,
+                            brokerid, auth_code, appid)
         self.md_api.connect(md_address, userid, password, brokerid)
 
         self.init_query()
@@ -200,6 +213,10 @@ class CtpGateway(BaseGateway):
         else:
             vt_orderid: str = self.td_api.send_order(req)
         return vt_orderid
+
+    def insert_comb(self, req: OrderRequest) -> str:
+        """申请组合录入"""
+        self.td_api.insert_comb(req)
 
     def cancel_order(self, req: CancelRequest) -> None:
         """委托撤单"""
@@ -583,7 +600,8 @@ class CtpTdApi(TdApi):
         account: AccountData = AccountData(
             accountid=data["AccountID"],
             balance=data["Balance"],
-            frozen=data["FrozenMargin"] + data["FrozenCash"] + data["FrozenCommission"],
+            frozen=data["FrozenMargin"] +
+            data["FrozenCash"] + data["FrozenCommission"],
             gateway_name=self.gateway_name
         )
         account.available = data["Available"]
@@ -613,10 +631,12 @@ class CtpTdApi(TdApi):
                     contract.option_portfolio = data["ProductID"]
 
                 contract.option_underlying = data["UnderlyingInstrID"]
-                contract.option_type = OPTIONTYPE_CTP2VT.get(data["OptionsType"], None)
+                contract.option_type = OPTIONTYPE_CTP2VT.get(
+                    data["OptionsType"], None)
                 contract.option_strike = data["StrikePrice"]
                 contract.option_index = str(data["StrikePrice"])
-                contract.option_expiry = datetime.strptime(data["ExpireDate"], "%Y%m%d")
+                contract.option_expiry = datetime.strptime(
+                    data["ExpireDate"], "%Y%m%d")
 
             self.gateway.on_contract(contract)
 
@@ -652,7 +672,8 @@ class CtpTdApi(TdApi):
         dt: datetime = datetime.strptime(timestamp, "%Y%m%d %H:%M:%S")
         dt = CHINA_TZ.localize(dt)
 
-        tp = (data["OrderPriceType"], data["TimeCondition"], data["VolumeCondition"])
+        tp = (data["OrderPriceType"], data["TimeCondition"],
+              data["VolumeCondition"])
 
         order: OrderData = OrderData(
             symbol=symbol,
@@ -811,6 +832,27 @@ class CtpTdApi(TdApi):
         self.gateway.on_order(order)
 
         return order.vt_orderid
+
+    def insert_comb(self, req: CombRequest) -> str:
+        """申请组合绑定或拆分"""
+        if req.type not in COMB_DIRECTION_CTP2VT:
+            self.gateway.write_log("请选择组合绑定或拆分的方向")
+            return ""
+
+        ctp_req: dict = {
+            "InstrumentID": req.InstrumentId,
+            "ExchangeID": req.exchange.value,
+            "Volume": req.volume,
+            "Direction": DIRECTION_VT2CTP.get(req.direction, ""),
+            "CombDirection": COMB_DIRECTION_CTP2VT.get(req.type, ""),
+            "CombHedgeFlag": THOST_FTDC_HF_Speculation,
+            "InvestorID": self.userid,
+            "UserID": self.userid,
+            "BrokerID": self.brokerid,
+        }
+
+        self.reqid += 1
+        self.reqCombActionInsert(ctp_req, self.reqid)
 
     def cancel_order(self, req: CancelRequest) -> None:
         """委托撤单"""
