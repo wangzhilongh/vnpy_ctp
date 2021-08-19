@@ -214,7 +214,7 @@ class CtpGateway(BaseGateway):
             vt_orderid: str = self.td_api.send_order(req)
         return vt_orderid
 
-    def insert_comb(self, req: OrderRequest) -> str:
+    def insert_comb(self, req: CombRequest) -> str:
         """申请组合录入"""
         self.td_api.insert_comb(req)
 
